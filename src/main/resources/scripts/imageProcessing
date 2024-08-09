@@ -1,0 +1,205 @@
+// This macro is designed to automatically segment, subtract 
+// the background and measure standard parameters from 2D 
+// micrographs of the immunological synapse.
+//
+// A reference file will then automatically open along with
+// a dialog box. Fill in the channel names in the correct order
+// (according to the reference file). The macro will then analyse and save
+// the images accordingly.
+
+// Written by Audun Kvalvaag. Last modified
+// 07.10.2022.
+
+// Select input and output directories
+
+#@ File (label = "Input directory", style = "directory") dir
+#@ File (label = "Output directory", style = "directory") dirOut
+#@ String (label = "File suffix", value = "vsi") filetype
+#@ String (label = "Mask channel", value ="BF") maskCh
+#@ String(choices={"Yes","No"}, style="radioButtonHorizontal") Watershed
+//#@ String(choices={"Yes","No"}, style="radioButtonHorizontal") blackBg
+#@ String(choices={"Yes","No"}, style="radioButtonHorizontal") fitCircle
+#@ String(choices={"Yes","No"}, style="radioButtonHorizontal") analyzeBg
+
+
+dir = dir+File.separator;
+print("dir: ", dir);
+print("maskCh: ", maskCh);
+
+subfolders = getFileList(dir);
+Array.print(subfolders);
+nS = subfolders.length;
+print(nS);
+
+
+folder = dir+subfolders[0];
+files = getFileList(folder);
+Array.print(files);
+
+for (i = 0; i < files.length; i++) {
+	if (endsWith(files[i], filetype)) {
+	ch_file = folder + files[i];
+	}
+}
+
+run("Bio-Formats Importer", "open=[ch_file]");
+
+nC = nSlices();
+print(nC);
+Channels = newArray(nC);
+
+Dialog.create("Channels")
+for (c=0; c < nC; c++) {
+	Dialog.addString("Ch" + c, " ");
+}
+Dialog.addChoice("Check threshold?", newArray("Yes", "No"), "Yes");
+Dialog.show();
+
+checkThreshold = Dialog.getChoice();
+
+for (c=0; c < nC; c++) {
+	Channels[c] = Dialog.getString();
+}
+
+Array.print(Channels);
+close();
+
+if (checkThreshold == "Yes") {
+	run("Bio-Formats Importer", "open=[ch_file]");
+	run("Split Channels");
+	ImgArray = getList("image.titles");
+	for (s = 0; s < nC; s++) {
+		selectWindow(ImgArray[s]);
+		rename(Channels[s]); 
+	}
+	selectWindow(maskCh);
+	if (maskCh == "SIRC") {
+		run("Subtract Background...", "rolling=300 light");
+		run("Enhance Contrast...", "saturated=0.1 normalize");
+		run("Add...", "value=10000");
+		run("Median...", "radius=10");	
+	} else {
+		run("Enhance Contrast...", "saturated=0.35");
+		run("Despeckle");
+		run("Subtract Background...", "rolling=50");
+		run("Gaussian Blur...", "sigma=0.2");
+		run("Enhance Contrast...", "saturated=0.1");
+	}
+	run("Threshold...");
+	waitForUser("Press OK when threshold check is complete");
+	getThreshold(lower, upper);
+} else {
+	setAutoThreshold("Default dark");
+	getThreshold(lower, upper);
+	print(lower);
+	print(upper);
+}
+
+run("Close All");
+
+sortCh(dir);
+
+setBatchMode(true);
+
+function sortCh(dir) {
+	for (sf=0; sf < subfolders.length; sf++) {
+		subfolder = dir+subfolders[sf];
+		print("subfolder: ");
+		print(subfolder);
+		datafiles = getFileList(subfolder);
+		print("Datafiles:");
+		Array.print(datafiles);
+		resFolder = dirOut + File.separator + "res_" + subfolders[sf];
+		print("resFolder:", resFolder); 
+		File.makeDirectory(resFolder);
+		Name = File.getName(resFolder);
+		print(Name); 
+		for (i = 0; i < datafiles.length; i++) {
+			if (endsWith(datafiles[i], filetype)) {
+				file = subfolder + datafiles[i];
+				run("Bio-Formats Importer", "open=[file]");
+				Img = resFolder + datafiles[i]; 
+				print(Img); 
+				File.makeDirectory(Img);
+				run("Split Channels");
+				ImgArray = getList("image.titles");
+				for (s = 0; s < nC; s++) {
+					selectWindow(ImgArray[s]);
+					rename(Channels[s]); 
+				}	
+				ImgArray2 = getList("image.titles");
+				n = nImages;
+				selectWindow(maskCh);
+				run("Duplicate...", " ");
+				if (maskCh == "SIRC") {
+					run("Subtract Background...", "rolling=300 light");
+					run("Enhance Contrast...", "saturated=0.1 normalize");
+					run("Add...", "value=10000");
+					run("Median...", "radius=10");
+				} else {
+					run("Enhance Contrast...", "saturated=0.35");
+					run("Despeckle");
+					run("Subtract Background...", "rolling=50");
+					run("Gaussian Blur...", "sigma=0.2");
+					run("Enhance Contrast...", "saturated=0.1");
+				}
+				
+//				print(lower);
+//				print(upper);
+				setThreshold(lower, upper);
+				run("Convert to Mask");
+				run("Close-");
+				//run("Fill Holes");
+				if (Watershed == "Yes") {
+					run("Watershed");
+				}
+				run("Analyze Particles...", "size=0-Infinity exclude exclude add");
+				saveAs("Tiff", Img + File.separator + "masks");
+				close();
+				if (roiManager("count") > 0){
+					roiManager("Save", Img + File.separator + "ROI.zip");
+					for (m = 0; m < n; m++) {
+						ImgName = getTitle();
+						//run("Set Scale...", "distance=0 known=0 pixel=1 unit=pixel");
+						run("Subtract Background...", "rolling=50");
+						saveAs("Tiff", Img + File.separator + ImgName);
+						roiManager("measure");
+						if (analyzeBg == "Yes") {
+							roiManager("deselect");
+							roiManager("combine");
+							run("Make Inverse");
+							run("Measure");
+						}
+						i2 = replace(ImgName, ".tif", "_files");
+						outFolder = Img + File.separator + "fiji_" + i2; 
+						print("outFolder: ", outFolder); 
+						File.makeDirectory(outFolder);
+						setBatchMode(true);
+						wait(50);
+						for (o = 0; o < roiManager("count"); o++) {
+							roiManager("select", o);
+							if (fitCircle == "Yes") {
+							run("Fit Circle");
+							}
+							run("Duplicate...", "duplicate");
+							//run("Clear Outside");
+							cell = getTitle();
+							run("Select None");
+							saveAs("Tiff", outFolder + File.separator + "_" + o + "_" + cell);
+							close();
+						}	
+						close();
+					}
+					roiManager("deselect");
+					roiManager("delete");
+				} else {
+					run("Close All");
+				}
+			}
+		}
+		selectWindow("Results");
+		saveAs("text", resFolder + File.separator + Name);
+		run("Close");
+		run("Collect Garbage");
+	}
+}
